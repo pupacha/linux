@@ -67,6 +67,7 @@ static int mshv_parse_mshv_irqfd(struct mshv_irqfd *irqfd,
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_X86)
 /* Must be called with interrupts disabled */
 static int hv_vpset_from_hyp_disabled(
 			struct hv_input_get_vp_set_from_mda *input,
@@ -90,6 +91,7 @@ static int hv_vpset_from_hyp_disabled(
 
 	return hv_result_to_errno(status);
 }
+#endif /* CONFIG_X86 */
 
 /* Returns number of banks copied, -errno in case of error */
 static int hv_copy_vpset(struct hv_vpset *dest, struct hv_vpset *src)
@@ -123,8 +125,10 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	struct hv_input_map_device_interrupt *irq_input;
 	struct hv_output_map_device_interrupt *irq_output;
 	struct hv_device_interrupt_descriptor *intdesc;
+#if IS_ENABLED(CONFIG_X86)
 	struct hv_input_get_vp_set_from_mda *mda_input;
 	union hv_output_get_vp_set_from_mda *mda_output;
+#endif
 	ulong flags;
 	u64 status;
 	int rc, var_size;
@@ -132,6 +136,7 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	*ret_status = U64_MAX;
 	local_irq_save(flags);
 
+#if IS_ENABLED(CONFIG_X86)
 	mda_input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	mda_output = *this_cpu_ptr(hyperv_pcpu_output_arg);
 
@@ -143,6 +148,7 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	rc = hv_vpset_from_hyp_disabled(mda_input, mda_output, ginfo, ptid);
 	if (rc)
 		goto out;	/* error already printed */
+#endif
 
 	irq_input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	irq_output = *this_cpu_ptr(hyperv_pcpu_output_arg);
@@ -164,12 +170,22 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	intdesc->target.vp_set.valid_bank_mask = 0;
 	intdesc->target.vp_set.format = HV_GENERIC_SET_SPARSE_4K;
 	intdesc->target.flags = HV_DEVICE_INTERRUPT_TARGET_PROCESSOR_SET;
+#if IS_ENABLED(CONFIG_X86)
 	rc = hv_copy_vpset(&intdesc->target.vp_set, &mda_output->target_vpset);
 	if (rc <= 0) {
 		pr_err("Hyper-V: ptid %lld - (irq)vpset copy failed (%d)\n",
 		       ptid, rc);
 		goto out;
 	}
+#else
+	/*
+	 * On ARM64, hyp-side MDA->VPSET translation is not used. Target
+	 * CPU0 directly via a single sparse bank.
+	 */
+	intdesc->target.vp_set.valid_bank_mask = 1;
+	intdesc->target.vp_set.bank_contents[0] = 1;
+	rc = 1;
+#endif
 
 	/*
 	 * var-sized hcall: var-size starts after vp_mask (thus vp_set.format
@@ -198,6 +214,7 @@ out:
 
 }
 
+#if IS_ENABLED(CONFIG_X86)
 /* NOTE: caller does spin_lock_irq on pt_irqfds_lock, hence no disable here */
 static void mshv_do_guest_irq_retarget(u64 partid, struct mshv_irqfd *irqfd)
 {
@@ -225,7 +242,6 @@ static void mshv_do_guest_irq_retarget(u64 partid, struct mshv_irqfd *irqfd)
 		return;
 
 	hv_devid.as_uint64 = hv_devid_from_pdev(pdev);
-
 
 	mda_input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	mda_output = *this_cpu_ptr(hyperv_pcpu_output_arg);
@@ -268,6 +284,7 @@ static void mshv_do_guest_irq_retarget(u64 partid, struct mshv_irqfd *irqfd)
 			      partid, lapic_irq->lapic_vector,
 			      lapic_irq->lapic_apic_id);
 }
+#endif /* CONFIG_X86 */
 
 static int mshv_unmap_device_interrupt(union hv_device_id hv_devid,
 				       struct hv_interrupt_entry *irq_entry)
