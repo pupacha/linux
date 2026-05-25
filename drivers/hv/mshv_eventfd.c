@@ -391,8 +391,13 @@ static void mshv_make_device_usable(struct pci_dev *pdev, int vector,
 	}
 
 	msimsg.address_hi = 0;
+#if IS_ENABLED(CONFIG_X86)
 	msimsg.address_lo = hv_entry->msi_entry.address.as_uint32;
 	msimsg.data =  hv_entry->msi_entry.data.as_uint32;
+#else
+	msimsg.address_lo = lower_32_bits(hv_entry->msi_entry.address);
+	msimsg.data = hv_entry->msi_entry.data;
+#endif
 
 	pcicmd = mshv_pci_memory_lock_and_enable(coredev);
 	pci_write_msi_msg(lirq, &msimsg);
