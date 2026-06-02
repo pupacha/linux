@@ -242,18 +242,18 @@ static void mshv_do_guest_irq_retarget(u64 partid, struct mshv_irqfd *irqfd)
 	struct pci_dev *pdev;
 	struct irq_data *irqdata;
 	struct mshv_lapic_irq *lapic_irq = &irqfd->irqfd_lapic_irq;
-	struct hv_interrupt_entry *inte = NULL;
+	struct hv_interrupt_entry *inte;
 
 	if (!irqfd->irqfd_girq_ent.girq_entry_valid ||
 	    irqfd->irqfd_bypass_prod == NULL)
 		return;
 
-	rc = mshv_parse_mshv_irqfd(irqfd, &pdev, &irqdata);
-	if (rc)
+	inte = irqfd->irqfd_hv_entry;
+	if (inte == NULL)
 		return;
 
-	inte = irqdata->chip_data;
-	if (inte == NULL)
+	rc = mshv_parse_mshv_irqfd(irqfd, &pdev, &irqdata);
+	if (rc)
 		return;
 
 	hv_devid.as_uint64 = hv_devid_from_pdev(pdev);
@@ -332,32 +332,35 @@ static int mshv_unmap_device_interrupt(union hv_device_id hv_devid,
 	return hv_result_to_errno(status);
 }
 
-static int mshv_chk_unmap_irq(union hv_device_id hv_devid,
-			      struct irq_data *irqdata)
+/*
+ * Drop any active HVCALL_MAP_DEVICE_INTERRUPT mapping previously installed
+ * for this irqfd. Uses state stored on the irqfd itself, so it survives
+ * VFIO free_irq()/request_irq() cycles that would otherwise lose track of
+ * the mapping if it were stashed in irq_data->chip_data.
+ */
+static int mshv_irqfd_drop_hv_map(struct mshv_irqfd *irqfd)
 {
+	union hv_device_id hv_devid;
+	struct hv_interrupt_entry *entry = irqfd->irqfd_hv_entry;
 	int rc;
 
-	pr_err("Hyper-V: mshv_chk_unmap_irq: device_id=0x%llx irqdata=%p irq=%u hwirq=0x%lx chip=%s chip_data=%p parent=%p\n",
-	       hv_devid.as_uint64, irqdata, irqdata->irq, irqdata->hwirq,
-	       irqdata->chip ? irqdata->chip->name : "<null>",
-	       irqdata->chip_data, irqdata->parent_data);
-	if (irqdata->parent_data)
-		pr_err("Hyper-V: mshv_chk_unmap_irq: parent irqdata=%p irq=%u hwirq=0x%lx chip=%s chip_data=%p\n",
-		       irqdata->parent_data, irqdata->parent_data->irq,
-		       irqdata->parent_data->hwirq,
-		       irqdata->parent_data->chip ? irqdata->parent_data->chip->name : "<null>",
-		       irqdata->parent_data->chip_data);
-
-	if (irqdata->chip_data == NULL)
+	if (entry == NULL)
 		return 0;
 
-	rc = mshv_unmap_device_interrupt(hv_devid, irqdata->chip_data);
-	if (rc)
+	hv_devid.as_uint64 = irqfd->irqfd_hv_devid;
+	pr_err("Hyper-V: mshv_irqfd_drop_hv_map: irqfd=%p gsi=%u devid=0x%llx entry=%p\n",
+	       irqfd, irqfd->irqfd_irqnum, hv_devid.as_uint64, entry);
+
+	rc = mshv_unmap_device_interrupt(hv_devid, entry);
+	if (rc) {
+		pr_err("Hyper-V: mshv_irqfd_drop_hv_map: unmap failed rc=%d (leaking entry to avoid hyp inconsistency)\n",
+		       rc);
 		return rc;
+	}
 
-	kfree(irqdata->chip_data);
-	irqdata->chip_data = NULL;
-
+	kfree(entry);
+	irqfd->irqfd_hv_entry = NULL;
+	irqfd->irqfd_hv_devid = 0;
 	return 0;
 }
 
@@ -481,9 +484,15 @@ static void mshv_pthru_dev_irq_remap(struct mshv_irqfd *irqfd)
 	pr_err("Hyper-V: pthru_dev_irq_remap: hv_devid=0x%llx type=%u for %s\n",
 	       hv_devid.as_uint64, hv_devid.device_type, pci_name(pdev));
 
-	rc = mshv_chk_unmap_irq(hv_devid, irqdata);
+	/*
+	 * If we previously mapped an interrupt for this irqfd (e.g. VFIO is
+	 * re-registering its bypass producer after a free_irq()/request_irq()
+	 * cycle), tear that mapping down first so we don't leave a duplicate
+	 * (device_id, vector) entry in the hypervisor.
+	 */
+	rc = mshv_irqfd_drop_hv_map(irqfd);
 	if (rc) {
-		pr_err("Hyper-V: pthru_dev_irq_remap: chk_unmap_irq failed rc=%d\n",
+		pr_err("Hyper-V: pthru_dev_irq_remap: drop_hv_map failed rc=%d\n",
 		       rc);
 		return;
 	}
@@ -518,30 +527,18 @@ static void mshv_pthru_dev_irq_remap(struct mshv_irqfd *irqfd)
 		return;
 	}
 
-	irqdata->chip_data = new_entry;
+	irqfd->irqfd_hv_entry = new_entry;
+	irqfd->irqfd_hv_devid = hv_devid.as_uint64;
 
-	pr_err("Hyper-V: pthru_dev_irq_remap: map OK; chip_data=%p stored on irqdata=%p irq=%u hwirq=0x%lx; calling make_device_usable\n",
-	       new_entry, irqdata, irqdata->irq, irqdata->hwirq);
+	pr_err("Hyper-V: pthru_dev_irq_remap: map OK; entry=%p stored on irqfd=%p devid=0x%llx irq=%u hwirq=0x%lx; calling make_device_usable\n",
+	       new_entry, irqfd, hv_devid.as_uint64,
+	       irqdata->irq, irqdata->hwirq);
 	mshv_make_device_usable(pdev, irqdata->hwirq, new_entry);
 }
 
 static void mshv_pthru_dev_irq_undo(struct mshv_irqfd *irqfd)
 {
-	struct pci_dev *pdev;
-	union hv_device_id hv_devid;
-	struct irq_data *irqdata;
-	int rc;
-
-	if (!irqfd->irqfd_girq_ent.girq_entry_valid ||
-	    irqfd->irqfd_bypass_prod == NULL)
-		return;
-
-	rc = mshv_parse_mshv_irqfd(irqfd, &pdev, &irqdata);
-	if (rc)
-		return;
-
-	hv_devid.as_uint64 = hv_devid_from_pdev(pdev);
-	mshv_chk_unmap_irq(hv_devid, irqdata);
+	(void)mshv_irqfd_drop_hv_map(irqfd);
 }
 
 //#else /* IS_ENABLED(CONFIG_X86_64) */

@@ -11,6 +11,8 @@
 #include <linux/poll.h>
 #include <linux/irqbypass.h>
 
+#include <asm/mshyperv.h>
+
 #include "mshv.h"
 #include "mshv_root.h"
 
@@ -40,6 +42,15 @@ struct mshv_irqfd {
 	struct hlist_node		     irqfd_resampler_hnode;
 	struct irq_bypass_consumer	     irqfd_bypass_cons;
 	struct irq_bypass_producer	    *irqfd_bypass_prod;
+	/*
+	 * Tracks an active HVCALL_MAP_DEVICE_INTERRUPT mapping for this irqfd.
+	 * Owned by mshv (allocated/freed in mshv_pthru_dev_irq_remap/undo).
+	 * NOT stored in irq_data->chip_data because that field is owned by the
+	 * underlying irqchip (e.g. GIC-ITS on ARM64) and may be cleared/replaced
+	 * across VFIO free_irq()/request_irq() cycles, leaking the hv mapping.
+	 */
+	struct hv_interrupt_entry	    *irqfd_hv_entry;
+	u64				     irqfd_hv_devid;
 };
 
 void mshv_eventfd_init(struct mshv_partition *partition);
