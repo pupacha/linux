@@ -337,8 +337,16 @@ static int mshv_chk_unmap_irq(union hv_device_id hv_devid,
 {
 	int rc;
 
-	pr_err("Hyper-V: mshv_chk_unmap_irq: device_id=0x%llx hwirq=0x%lx chip_data=%p\n",
-	       hv_devid.as_uint64, irqdata->hwirq, irqdata->chip_data);
+	pr_err("Hyper-V: mshv_chk_unmap_irq: device_id=0x%llx irqdata=%p irq=%u hwirq=0x%lx chip=%s chip_data=%p parent=%p\n",
+	       hv_devid.as_uint64, irqdata, irqdata->irq, irqdata->hwirq,
+	       irqdata->chip ? irqdata->chip->name : "<null>",
+	       irqdata->chip_data, irqdata->parent_data);
+	if (irqdata->parent_data)
+		pr_err("Hyper-V: mshv_chk_unmap_irq: parent irqdata=%p irq=%u hwirq=0x%lx chip=%s chip_data=%p\n",
+		       irqdata->parent_data, irqdata->parent_data->irq,
+		       irqdata->parent_data->hwirq,
+		       irqdata->parent_data->chip ? irqdata->parent_data->chip->name : "<null>",
+		       irqdata->parent_data->chip_data);
 
 	if (irqdata->chip_data == NULL)
 		return 0;
@@ -512,8 +520,8 @@ static void mshv_pthru_dev_irq_remap(struct mshv_irqfd *irqfd)
 
 	irqdata->chip_data = new_entry;
 
-	pr_err("Hyper-V: pthru_dev_irq_remap: map OK; calling make_device_usable hwirq=0x%lx\n",
-	       irqdata->hwirq);
+	pr_err("Hyper-V: pthru_dev_irq_remap: map OK; chip_data=%p stored on irqdata=%p irq=%u hwirq=0x%lx; calling make_device_usable\n",
+	       new_entry, irqdata, irqdata->irq, irqdata->hwirq);
 	mshv_make_device_usable(pdev, irqdata->hwirq, new_entry);
 }
 
@@ -913,13 +921,24 @@ static int mshv_irq_bypass_add_producer(struct irq_bypass_consumer *cons,
 					struct irq_bypass_producer *prod)
 {
 	struct mshv_irqfd *irqfd;
+	struct irq_data *id;
 
 	irqfd = container_of(cons, struct mshv_irqfd, irqfd_bypass_cons);
 	irqfd->irqfd_bypass_prod = prod;
 
-	pr_err("Hyper-V: mshv_irq_bypass_add_producer: irqfd=%p gsi=%u prod->irq=0x%x eventfd=0x%lx\n",
-	       irqfd, irqfd->irqfd_irqnum, prod->irq,
-	       (unsigned long)irqfd->irqfd_eventfd_ctx);
+	id = irq_get_irq_data(prod->irq);
+	pr_err("Hyper-V: mshv_irq_bypass_add_producer: irqfd=%p gsi=%u prod=%p prod->irq=%u eventfd=0x%lx irqdata=%p hwirq=0x%lx chip=%s chip_data=%p parent=%p\n",
+	       irqfd, irqfd->irqfd_irqnum, prod, prod->irq,
+	       (unsigned long)irqfd->irqfd_eventfd_ctx,
+	       id, id ? id->hwirq : 0,
+	       (id && id->chip) ? id->chip->name : "<null>",
+	       id ? id->chip_data : NULL,
+	       id ? id->parent_data : NULL);
+	if (id && id->parent_data)
+		pr_err("Hyper-V: add_producer: parent irqdata=%p hwirq=0x%lx chip=%s chip_data=%p\n",
+		       id->parent_data, id->parent_data->hwirq,
+		       id->parent_data->chip ? id->parent_data->chip->name : "<null>",
+		       id->parent_data->chip_data);
 
 	mshv_pthru_dev_irq_remap(irqfd);
 
@@ -930,8 +949,15 @@ static void mshv_irq_bypass_del_producer(struct irq_bypass_consumer *cons,
 					 struct irq_bypass_producer *prod)
 {
 	struct mshv_irqfd *irqfd;
+	struct irq_data *id;
 
 	irqfd = container_of(cons, struct mshv_irqfd, irqfd_bypass_cons);
+
+	id = irq_get_irq_data(prod->irq);
+	pr_err("Hyper-V: mshv_irq_bypass_del_producer: irqfd=%p gsi=%u prod=%p prod->irq=%u eventfd=0x%lx irqdata=%p chip_data=%p\n",
+	       irqfd, irqfd->irqfd_irqnum, prod, prod->irq,
+	       (unsigned long)irqfd->irqfd_eventfd_ctx,
+	       id, id ? id->chip_data : NULL);
 
 	WARN_ON(irqfd->irqfd_bypass_prod != prod);
 	irqfd->irqfd_bypass_prod = NULL;
