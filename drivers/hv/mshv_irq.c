@@ -23,6 +23,9 @@ int mshv_update_routing_table(struct mshv_partition *partition,
 	u32 i, nr_rt_entries = 0;
 	int r = 0;
 
+	pr_err("Hyper-V: mshv_update_routing_table: pt_id=%lld numents=%u\n",
+	       partition->pt_id, numents);
+
 	if (numents == 0)
 		goto swap_routes;
 
@@ -52,6 +55,8 @@ int mshv_update_routing_table(struct mshv_partition *partition,
 		 * Allow only one to one mapping between GSI and MSI routing.
 		 */
 		if (girq->guest_irq_num != 0) {
+			pr_err("Hyper-V: routing: duplicate gsi %u\n",
+			       ue[i].gsi);
 			r = -EINVAL;
 			goto out;
 		}
@@ -61,6 +66,12 @@ int mshv_update_routing_table(struct mshv_partition *partition,
 		girq->girq_addr_hi = ue[i].address_hi;
 		girq->girq_irq_data = ue[i].data;
 		girq->girq_entry_valid = true;
+
+		// pr_err("Hyper-V:   installed girq[%u]: vec=0x%x apic_id=0x%x int_type=0x%x\n",
+		//        ue[i].gsi, ue[i].data & 0xFF,
+		//        (ue[i].address_lo >> 12) & 0xFF,
+		//        (ue[i].data & 0x700) >> 8);
+		pr_err("mshv_update_routing_table: gsi: %u, address_lo: %u, %#x, address_hi: %u, data: %u \n", girq->guest_irq_num, girq->girq_addr_lo, girq->girq_addr_lo, girq->girq_addr_hi, girq->girq_irq_data);
 	}
 
 swap_routes:

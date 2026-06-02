@@ -133,6 +133,10 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	u64 status;
 	int rc, var_size;
 
+	pr_err("Hyper-V: mshv_map_device_interrupt: ptid=%lld device_id=0x%llx type=%u vec=0x%x apic_id=0x%llx\n",
+	       ptid, hv_devid.as_uint64, hv_devid.device_type,
+	       ginfo->lapic_vector, ginfo->lapic_apic_id);
+
 	*ret_status = U64_MAX;
 	local_irq_save(flags);
 
@@ -167,7 +171,7 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	intdesc->target.vector = ginfo->lapic_vector;
 	intdesc->trigger_mode = HV_INTERRUPT_TRIGGER_MODE_EDGE;
 
-	intdesc->target.vp_set.valid_bank_mask = 0;
+	// intdesc->target.vp_set.valid_bank_mask = 0;
 	intdesc->target.vp_set.format = HV_GENERIC_SET_SPARSE_4K;
 	intdesc->target.flags = HV_DEVICE_INTERRUPT_TARGET_PROCESSOR_SET;
 #if IS_ENABLED(CONFIG_X86)
@@ -192,6 +196,17 @@ static int mshv_map_device_interrupt(u64 ptid, union hv_device_id hv_devid,
 	 * does not count, but vp_set.valid_bank_mask does).
 	 */
 	var_size = rc + 1;
+
+	pr_err("Hyper-V: HVCALL_MAP_DEVICE_INTERRUPT: var_size=%d ptid=%lld device_id=0x%llx interrupt_type=0x%x trigger_mode=0x%x vector_count=%d target.vector=%u target.flags=0x%x vp_set.format=%llu vp_set.valid_bank_mask=0x%llx vp_set.bank_contents[0]=0x%llx lapic_apic_id=0x%llx\n",
+	       var_size, ptid, irq_input->device_id,
+	       intdesc->interrupt_type, intdesc->trigger_mode,
+	       intdesc->vector_count, intdesc->target.vector,
+	       intdesc->target.flags,
+	       (u64)intdesc->target.vp_set.format,
+	       intdesc->target.vp_set.valid_bank_mask,
+	       intdesc->target.vp_set.bank_contents[0],
+	       ginfo->lapic_apic_id);
+
 	status = hv_do_rep_hypercall(HVCALL_MAP_DEVICE_INTERRUPT, 0, var_size,
 				     irq_input, irq_output);
 	*ret_entry = irq_output->interrupt_entry;
@@ -293,6 +308,9 @@ static int mshv_unmap_device_interrupt(union hv_device_id hv_devid,
 	struct hv_input_unmap_device_interrupt *input;
 	u64 status;
 
+	pr_err("Hyper-V: mshv_unmap_device_interrupt: device_id=0x%llx type=%u\n",
+	       hv_devid.as_uint64, hv_devid.device_type);
+
 	local_irq_save(flags);
 	input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	memset(input, 0, sizeof(*input));
@@ -318,6 +336,9 @@ static int mshv_chk_unmap_irq(union hv_device_id hv_devid,
 			      struct irq_data *irqdata)
 {
 	int rc;
+
+	pr_err("Hyper-V: mshv_chk_unmap_irq: device_id=0x%llx hwirq=0x%lx chip_data=%p\n",
+	       hv_devid.as_uint64, irqdata->hwirq, irqdata->chip_data);
 
 	if (irqdata->chip_data == NULL)
 		return 0;
@@ -364,6 +385,9 @@ static void mshv_make_device_usable(struct pci_dev *pdev, int vector,
 	struct irq_data *irqdata;
 	u16 pcicmd;
 	struct vfio_pci_core_device *coredev = dev_get_drvdata(&pdev->dev);
+
+	pr_err("Hyper-V: mshv_make_device_usable: pdev=%s vector=%d source=%u\n",
+	       pci_name(pdev), vector, hv_entry->source);
 
 	if (pdev->dev.driver == NULL ||
 	    strcmp(pdev->dev.driver->name, "vfio-pci") != 0) {
@@ -428,25 +452,44 @@ static void mshv_pthru_dev_irq_remap(struct mshv_irqfd *irqfd)
 	struct hv_interrupt_entry *new_entry;
 	struct irq_data *irqdata;
 
+	pr_err("Hyper-V: mshv_pthru_dev_irq_remap: irqfd=%p gsi=%u valid=%d prod=%p\n",
+	       irqfd, irqfd ? irqfd->irqfd_irqnum : 0,
+	       irqfd ? irqfd->irqfd_girq_ent.girq_entry_valid : -1,
+	       irqfd ? irqfd->irqfd_bypass_prod : NULL);
+
 	if (!irqfd->irqfd_girq_ent.girq_entry_valid ||
-	    irqfd->irqfd_bypass_prod == NULL)
+	    irqfd->irqfd_bypass_prod == NULL) {
+		pr_err("Hyper-V: pthru_dev_irq_remap: skipped (girq invalid or no prod)\n");
 		return;
+	}
 
 	rc = mshv_parse_mshv_irqfd(irqfd, &pdev, &irqdata);
-	if (rc)
+	if (rc) {
+		pr_err("Hyper-V: pthru_dev_irq_remap: parse failed rc=%d\n", rc);
 		return;
+	}
 
 	hv_devid.as_uint64 = hv_devid_from_pdev(pdev);
+	pr_err("Hyper-V: pthru_dev_irq_remap: hv_devid=0x%llx type=%u for %s\n",
+	       hv_devid.as_uint64, hv_devid.device_type, pci_name(pdev));
 
 	rc = mshv_chk_unmap_irq(hv_devid, irqdata);
-	if (rc)
+	if (rc) {
+		pr_err("Hyper-V: pthru_dev_irq_remap: chk_unmap_irq failed rc=%d\n",
+		       rc);
 		return;
+	}
 
 	new_entry = kmalloc(sizeof(*new_entry), GFP_ATOMIC);
-	if (new_entry == NULL)
+	if (new_entry == NULL) {
+		pr_err("Hyper-V: pthru_dev_irq_remap: kmalloc failed\n");
 		return;
+	}
 
 	ptid = irqfd->irqfd_partn->pt_id;
+	pr_err("Hyper-V: pthru_dev_irq_remap: ptid=%lld ginfo vec=0x%x apic_id=0x%llx int_type=0x%x\n",
+	       ptid, ginfo->lapic_vector, ginfo->lapic_apic_id,
+	       ginfo->lapic_control.interrupt_type);
 
 	while (deposit_pgs--) {
 		rc = mshv_map_device_interrupt(ptid, hv_devid, ginfo, new_entry,
@@ -461,12 +504,16 @@ static void mshv_pthru_dev_irq_remap(struct mshv_irqfd *irqfd)
 			break;
 	}
 	if (rc) {
+		pr_err("Hyper-V: pthru_dev_irq_remap: map failed, freeing new_entry rc=%d\n",
+		       rc);
 		kfree(new_entry);
 		return;
 	}
 
 	irqdata->chip_data = new_entry;
 
+	pr_err("Hyper-V: pthru_dev_irq_remap: map OK; calling make_device_usable hwirq=0x%lx\n",
+	       irqdata->hwirq);
 	mshv_make_device_usable(pdev, irqdata->hwirq, new_entry);
 }
 
@@ -870,6 +917,10 @@ static int mshv_irq_bypass_add_producer(struct irq_bypass_consumer *cons,
 	irqfd = container_of(cons, struct mshv_irqfd, irqfd_bypass_cons);
 	irqfd->irqfd_bypass_prod = prod;
 
+	pr_err("Hyper-V: mshv_irq_bypass_add_producer: irqfd=%p gsi=%u prod->irq=0x%x eventfd=0x%lx\n",
+	       irqfd, irqfd->irqfd_irqnum, prod->irq,
+	       (unsigned long)irqfd->irqfd_eventfd_ctx);
+
 	mshv_pthru_dev_irq_remap(irqfd);
 
 	return 0;
@@ -895,10 +946,14 @@ static void mshv_setup_irq_bypass(struct mshv_irqfd *irqfd,
 
 	consumer->add_producer = mshv_irq_bypass_add_producer;
 	consumer->del_producer = mshv_irq_bypass_del_producer;
+	pr_err("Hyper-V: mshv_setup_irq_bypass: irqfd=%p gsi=%u eventfd=0x%lx\n",
+	       irqfd, irqfd->irqfd_irqnum, (unsigned long)eventfd);
 	rc = irq_bypass_register_consumer(&irqfd->irqfd_bypass_cons, eventfd);
 	if (rc)
 		pr_err("Hyper-V: irq bypass consumer registration failed: %d\n",
 		       rc);
+	pr_err("Hyper-V: mshv_setup_irq_bypass: DONE! eventfd=0x%lx\n",
+	       (unsigned long)eventfd);
 }
 
 static int mshv_irqfd_assign(struct mshv_partition *pt,
@@ -920,6 +975,9 @@ static int mshv_irqfd_assign(struct mshv_partition *pt,
 	irqfd->irqfd_irqnum = args->gsi;
 	INIT_WORK(&irqfd->irqfd_shutdown, mshv_irqfd_shutdown);
 	seqcount_spinlock_init(&irqfd->irqfd_irqe_sc, &pt->pt_irqfds_lock);
+
+	pr_err("HYPERV: mshv_irqfd_assign gsi:%d fd:%d\n",
+			irqfd->irqfd_irqnum, args->fd);
 
 	if (fd_empty(f)) {
 		ret = -EBADF;
