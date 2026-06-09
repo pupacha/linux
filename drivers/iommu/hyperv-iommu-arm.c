@@ -271,6 +271,11 @@ static struct iommu_domain *hv_iommu_domain_alloc_paging(struct device *dev)
 {
 	struct hv_domain *hvdom;
 	int rc;
+	u64 cur_partid;
+
+	pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s pid=%d comm=%s l1vh=%d\n",
+	       dev ? dev_name(dev) : "<null>", current->pid, current->comm,
+	       hv_l1vh_partition());
 
 	if (hv_l1vh_partition() && !hv_curr_thread_is_vmm()) {
 		pr_err("Hyper-V: l1vh iommu does not support host devices\n");
@@ -289,22 +294,37 @@ static struct iommu_domain *hv_iommu_domain_alloc_paging(struct device *dev)
 		goto out_err;
 
 	hvdom->domid_num = unique_id;
-	hvdom->partid = hv_get_current_partid();
+	cur_partid = hv_get_current_partid();
+	pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s domid=%u hv_get_current_partid()=%llu (INVALID=%llu) hvdom=%p\n",
+	       dev ? dev_name(dev) : "<null>", hvdom->domid_num, cur_partid,
+	       (u64)HV_PARTITION_ID_INVALID, hvdom);
+	hvdom->partid = cur_partid;
 	hvdom->iommu_dom.geometry = default_geometry;
 	hvdom->iommu_dom.pgsize_bitmap = HV_IOMMU_PGSIZES;
 
 	/* For guests, by default we do direct attaches, so no domain in hyp */
-	if (hv_dom_owner_is_vmm(hvdom) && !hv_no_attdev)
+	if (hv_dom_owner_is_vmm(hvdom) && !hv_no_attdev) {
 		hvdom->attached_dom = true;
-	else {
+		pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s domid=%u partid=%llu -> direct-attach domain (no hyp devdom)\n",
+		       dev ? dev_name(dev) : "<null>", hvdom->domid_num,
+		       hvdom->partid);
+	} else {
+		pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s domid=%u partid=%llu -> creating hyp devdom (no_attdev=%d)\n",
+		       dev ? dev_name(dev) : "<null>", hvdom->domid_num,
+		       hvdom->partid, hv_no_attdev);
 		rc = hv_iommu_create_hyp_devdom(hvdom);
 		if (rc)
 			goto out_err;
 	}
 
+	pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s SUCCESS hvdom=%p domid=%u partid=%llu attached_dom=%d\n",
+	       dev ? dev_name(dev) : "<null>", hvdom, hvdom->domid_num,
+	       hvdom->partid, hvdom->attached_dom);
 	return &hvdom->iommu_dom;
 
 out_err:
+	pr_err("Hyper-V: hv_iommu_domain_alloc_paging: dev=%s FAILED hvdom=%p\n",
+	       dev ? dev_name(dev) : "<null>", hvdom);
 	unique_id--;
 	kfree(hvdom);
 	return NULL;
@@ -388,6 +408,9 @@ static int hv_iommu_direct_attach_device(struct pci_dev *pdev, u64 ptid)
 	union hv_device_id host_devid;
 	enum hv_device_type dev_type;
 
+	pr_err("Hyper-V: hv_iommu_direct_attach_device: pdev=%s ptid=%llu l1vh=%d\n",
+	       pci_name(pdev), ptid, hv_l1vh_partition());
+
 	if (ptid == HV_PARTITION_ID_INVALID) {
 		pr_err("Hyper-V: Invalid partition id in direct attach\n");
 		return -EINVAL;
@@ -399,6 +422,10 @@ static int hv_iommu_direct_attach_device(struct pci_dev *pdev, u64 ptid)
 		dev_type = HV_DEVICE_TYPE_PCI;
 
 	host_devid.as_uint64 = hv_build_devid_oftype(pdev, dev_type);
+
+	pr_err("Hyper-V: hv_iommu_direct_attach_device: pdev=%s ptid=%llu host_devid=0x%llx (type=%u) logical_devid=0x%llx\n",
+	       pci_name(pdev), ptid, host_devid.as_uint64, dev_type,
+	       hv_build_devid_oftype(pdev, HV_DEVICE_TYPE_LOGICAL));
 
 	do {
 		local_irq_save(flags);
@@ -426,7 +453,12 @@ static int hv_iommu_direct_attach_device(struct pci_dev *pdev, u64 ptid)
 	} while (hv_result(status) == HV_STATUS_INSUFFICIENT_MEMORY);
 
 	if (!hv_result_success(status))
-		hv_status_err(status, "\n");
+		hv_status_err(status, "pdev=%s ptid=%llu host_devid=0x%llx logical_devid=0x%llx\n",
+			      pci_name(pdev), ptid, host_devid.as_uint64,
+			      input->logical_devid);
+	else
+		pr_err("Hyper-V: hv_iommu_direct_attach_device: SUCCESS pdev=%s ptid=%llu\n",
+		       pci_name(pdev), ptid);
 
 	return hv_result_to_errno(status);
 }
@@ -439,6 +471,19 @@ static int hv_iommu_attach_dev(struct iommu_domain *immdom, struct device *dev,
 	int rc;
 	struct hv_domain *hvdom_new = to_hv_domain(immdom);
 	struct hv_domain *hvdom_prev = dev_iommu_priv_get(dev);
+
+	pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s hvdom_new=%p (domid=%u partid=%llu attached_dom=%d special=%d) hvdom_prev=%p%s\n",
+	       dev_name(dev), hvdom_new,
+	       hvdom_new ? hvdom_new->domid_num : 0,
+	       hvdom_new ? hvdom_new->partid : 0,
+	       hvdom_new ? hvdom_new->attached_dom : -1,
+	       hvdom_new ? hv_special_domain(hvdom_new) : -1,
+	       hvdom_prev,
+	       hvdom_prev ? (hv_special_domain(hvdom_prev) ? " (prev=identity)" : "") : "");
+	if (hvdom_prev && !hv_special_domain(hvdom_prev))
+		pr_err("Hyper-V: hv_iommu_attach_dev: prev domid=%u partid=%llu attached_dom=%d\n",
+		       hvdom_prev->domid_num, hvdom_prev->partid,
+		       hvdom_prev->attached_dom);
 
 	/* Only allow PCI devices for now */
 	if (!dev_is_pci(dev))
@@ -456,22 +501,35 @@ static int hv_iommu_attach_dev(struct iommu_domain *immdom, struct device *dev,
 	 * hvdom_prev will not be null then. It is null during boot.
 	 */
 	if (hvdom_prev)
-		if (!hv_special_domain(hvdom_prev))
+		if (!hv_special_domain(hvdom_prev)) {
+			pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s detaching from prev hvdom (domid=%u partid=%llu)\n",
+			       dev_name(dev), hvdom_prev->domid_num,
+			       hvdom_prev->partid);
 			hv_iommu_detach_dev(&hvdom_prev->iommu_dom, dev);
+		}
 
 	if (hv_special_domain(hvdom_new)) {
+		pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s attaching to identity (special) domain\n",
+		       dev_name(dev));
 		dev_iommu_priv_set(dev, hvdom_new);  /* sets "private" field */
 		return 0;
 	}
 
-	if (hvdom_new->attached_dom)
+	if (hvdom_new->attached_dom) {
+		pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s -> direct_attach partid=%llu\n",
+		       dev_name(dev), hvdom_new->partid);
 		rc = hv_iommu_direct_attach_device(pdev, hvdom_new->partid);
-	else
+	} else {
+		pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s -> att_dev2dom domid=%u\n",
+		       dev_name(dev), hvdom_new->domid_num);
 		rc = hv_iommu_att_dev2dom(hvdom_new, pdev);
+	}
 
 	if (rc == 0)
 		dev_iommu_priv_set(dev, hvdom_new);  /* sets "private" field */
 
+	pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s done rc=%d\n",
+	       dev_name(dev), rc);
 	return rc;
 }
 
@@ -483,6 +541,9 @@ static void hv_iommu_det_dev_from_guest(struct pci_dev *pdev, u64 ptid)
 
 	log_devid = hv_build_devid_oftype(pdev, HV_DEVICE_TYPE_LOGICAL);
 
+	pr_err("Hyper-V: hv_iommu_det_dev_from_guest: pdev=%s ptid=%llu logical_devid=0x%llx\n",
+	       pci_name(pdev), ptid, log_devid);
+
 	local_irq_save(flags);
 	input = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	memset(input, 0, sizeof(*input));
@@ -493,7 +554,11 @@ static void hv_iommu_det_dev_from_guest(struct pci_dev *pdev, u64 ptid)
 	local_irq_restore(flags);
 
 	if (!hv_result_success(status))
-		hv_status_err(status, "\n");
+		hv_status_err(status, "pdev=%s ptid=%llu logical_devid=0x%llx\n",
+			      pci_name(pdev), ptid, log_devid);
+	else
+		pr_err("Hyper-V: hv_iommu_det_dev_from_guest: SUCCESS pdev=%s ptid=%llu\n",
+		       pci_name(pdev), ptid);
 }
 
 static void hv_iommu_det_dev_from_dom(struct pci_dev *pdev)
@@ -522,20 +587,33 @@ static void hv_iommu_detach_dev(struct iommu_domain *immdom, struct device *dev)
 	struct pci_dev *pdev;
 	struct hv_domain *hvdom = to_hv_domain(immdom);
 
+	pr_err("Hyper-V: hv_iommu_detach_dev: dev=%s hvdom=%p domid=%u partid=%llu attached_dom=%d special=%d parent_part=%d\n",
+	       dev_name(dev), hvdom,
+	       hvdom ? hvdom->domid_num : 0,
+	       hvdom ? hvdom->partid : 0,
+	       hvdom ? hvdom->attached_dom : -1,
+	       hvdom ? hv_special_domain(hvdom) : -1,
+	       hv_parent_partition());
+
 	/* See the attach function, only PCI devices for now */
 	if (!dev_is_pci(dev))
 		return;
 
 	pdev = to_pci_dev(dev);
 
-	if (hvdom->attached_dom || hv_parent_partition())
+	if (hvdom->attached_dom || hv_parent_partition()) {
+		pr_err("Hyper-V: hv_iommu_detach_dev: dev=%s -> det_dev_from_guest partid=%llu\n",
+		       dev_name(dev), hvdom->partid);
 		hv_iommu_det_dev_from_guest(pdev, hvdom->partid);
 
 		/* Do not reset attached_dom, hv_iommu_unmap_pages happens
 		 * next.
 		 */
-	else
+	} else {
+		pr_err("Hyper-V: hv_iommu_detach_dev: dev=%s -> det_dev_from_dom domid=%u\n",
+		       dev_name(dev), hvdom->domid_num);
 		hv_iommu_det_dev_from_dom(pdev);
+	}
 }
 
 static int hv_iommu_add_tree_mapping(struct hv_domain *hvdom,
@@ -814,12 +892,22 @@ static void hv_iommu_release_device(struct device *dev)
 {
 	struct hv_domain *hvdom = dev_iommu_priv_get(dev);
 
+	pr_err("Hyper-V: hv_iommu_release_device: dev=%s hvdom=%p%s%s\n",
+	       dev_name(dev), hvdom,
+	       hvdom ? " (will detach)" : " (no priv, skip detach)",
+	       (hvdom && hv_special_domain(hvdom)) ? " identity" : "");
+	if (hvdom && !hv_special_domain(hvdom))
+		pr_err("Hyper-V: hv_iommu_release_device: dev=%s domid=%u partid=%llu attached_dom=%d\n",
+		       dev_name(dev), hvdom->domid_num, hvdom->partid,
+		       hvdom->attached_dom);
+
 	/* Need to detach device from device domain if necessary. */
 	if (hvdom)
 		hv_iommu_detach_dev(&hvdom->iommu_dom, dev);
 
 	dev_iommu_priv_set(dev, NULL);
 	set_dma_ops(dev, NULL);
+	pr_err("Hyper-V: hv_iommu_release_device: dev=%s done\n", dev_name(dev));
 }
 
 static struct iommu_group *hv_iommu_device_group(struct device *dev)
