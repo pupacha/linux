@@ -516,6 +516,7 @@ static int hv_iommu_attach_dev(struct iommu_domain *immdom, struct device *dev,
 	}
 
 	if (hvdom_new->attached_dom) {
+		hvdom_new->partid = hv_get_current_partid();
 		pr_err("Hyper-V: hv_iommu_attach_dev: dev=%s -> direct_attach partid=%llu\n",
 		       dev_name(dev), hvdom_new->partid);
 		rc = hv_iommu_direct_attach_device(pdev, hvdom_new->partid);
