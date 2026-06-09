@@ -456,10 +456,10 @@ static int hv_iommu_attach_dev(struct iommu_domain *immdom, struct device *dev,
 	 * hvdom_prev will not be null then. It is null during boot.
 	 */
 	if (hvdom_prev)
-		if (!hv_l1vh_partition() || !hv_special_domain(hvdom_prev))
+		if (!hv_special_domain(hvdom_prev))
 			hv_iommu_detach_dev(&hvdom_prev->iommu_dom, dev);
 
-	if (hv_l1vh_partition() && hv_special_domain(hvdom_new)) {
+	if (hv_special_domain(hvdom_new)) {
 		dev_iommu_priv_set(dev, hvdom_new);  /* sets "private" field */
 		return 0;
 	}
@@ -528,7 +528,7 @@ static void hv_iommu_detach_dev(struct iommu_domain *immdom, struct device *dev)
 
 	pdev = to_pci_dev(dev);
 
-	if (hvdom->attached_dom)
+	if (hvdom->attached_dom || hv_parent_partition())
 		hv_iommu_det_dev_from_guest(pdev, hvdom->partid);
 
 		/* Do not reset attached_dom, hv_iommu_unmap_pages happens
